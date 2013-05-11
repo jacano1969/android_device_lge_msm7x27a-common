@@ -1,0 +1,1239 @@
+diff --git a/BoardConfigCommon.mk b/BoardConfigCommon.mk
+index e09d102..aa722ce 100644
+--- a/BoardConfigCommon.mk
++++ b/BoardConfigCommon.mk
+@@ -43,16 +43,15 @@ USE_OPENGL_RENDERER := true
+ 
+ # QCOM stuffs
+ BOARD_USES_QCOM_HARDWARE := true
+-TARGET_USES_OVERLAY := false
++TARGET_USES_OVERLAY := true
+ TARGET_HAVE_BYPASS  := false
+ #TARGET_USES_C2D_COMPOSITION := true
+ TARGET_USES_GENLOCK := true
+ TARGET_QCOM_HDMI_OUT := false
+ TARGET_FORCE_CPU_UPLOAD := true
+ BOARD_USES_QCOM_LIBS := true
+-BOARD_USE_QCOM_PMEM := true
+ BOARD_EGL_CFG := device/lge/msm7x27a-common/egl.cfg
+-TARGET_GRALLOC_USES_ASHMEM := true
++TARGET_USES_ION := true
+ 
+ BOARD_HAVE_BLUETOOTH := true
+ 
+@@ -78,7 +77,6 @@ WIFI_DRIVER_FW_PATH_AP  := "ap"
+ WIFI_DRIVER_FW_PATH_PARAM := "/data/misc/wifi/fwpath"
+ BOARD_LEGACY_NL80211_STA_EVENTS := true
+ 
+-COMMON_GLOBAL_CFLAGS += -DICS_CAMERA_BLOB -DQCOM_NO_SECURE_PLAYBACK -DQCOM_ICS_DECODERS
+-BOARD_NEEDS_MEMORYHEAPPMEM := true
++COMMON_GLOBAL_CFLAGS += -DQCOM_NO_SECURE_PLAYBACK
+ 
+ TARGET_DISABLE_ARM_PIE := true
+diff --git a/include/linux/android_pmem.h b/include/linux/android_pmem.h
+index a5671fe..cfca491 100644
+--- a/include/linux/android_pmem.h
++++ b/include/linux/android_pmem.h
+@@ -81,5 +81,89 @@ struct pmem_allocation {
+ 	unsigned int align;
+ };
+ 
++#ifdef __KERNEL__
++int get_pmem_file(unsigned int fd, unsigned long *start, unsigned long *vstart,
++		  unsigned long *end, struct file **filp);
++int get_pmem_fd(int fd, unsigned long *start, unsigned long *end);
++int get_pmem_user_addr(struct file *file, unsigned long *start,
++		       unsigned long *end);
++void put_pmem_file(struct file* file);
++void put_pmem_fd(int fd);
++void flush_pmem_fd(int fd, unsigned long start, unsigned long len);
++void flush_pmem_file(struct file *file, unsigned long start, unsigned long len);
++int pmem_cache_maint(struct file *file, unsigned int cmd,
++		struct pmem_addr *pmem_addr);
++
++enum pmem_allocator_type {
++	/* Zero is a default in platform PMEM structures in the board files,
++	 * when the "allocator_type" structure element is not explicitly
++	 * defined
++	 */
++	PMEM_ALLOCATORTYPE_BITMAP = 0, /* forced to be zero here */
++	PMEM_ALLOCATORTYPE_SYSTEM,
++
++	PMEM_ALLOCATORTYPE_ALLORNOTHING,
++	PMEM_ALLOCATORTYPE_BUDDYBESTFIT,
++
++	PMEM_ALLOCATORTYPE_MAX,
++};
++
++/* kernel api names for board specific data structures */
++#define PMEM_KERNEL_EBI1_DATA_NAME "pmem_kernel_ebi1"
++#define PMEM_KERNEL_SMI_DATA_NAME "pmem_kernel_smi"
++
++struct android_pmem_platform_data
++{
++	const char* name;
++	/* size of memory region */
++	unsigned long size;
++
++	enum pmem_allocator_type allocator_type;
++	/* treated as a 'hidden' variable in the board files. Can be
++	 * set, but default is the system init value of 0 which becomes a
++	 * quantum of 4K pages.
++	 */
++	unsigned int quantum;
++
++	/* set to indicate maps of this region should be cached, if a mix of
++	 * cached and uncached is desired, set this and open the device with
++	 * O_SYNC to get an uncached region */
++	unsigned cached;
++	/* The MSM7k has bits to enable a write buffer in the bus controller*/
++	unsigned buffered;
++	/* which memory type (i.e. SMI, EBI1) this PMEM device is backed by */
++	unsigned memory_type;
++	/*
++	 * function to be called when the number of allocations goes from
++	 * 0 -> 1
++	 */
++	int (*request_region)(void *);
++	/*
++	 * function to be called when the number of allocations goes from
++	 * 1 -> 0
++	 */
++	int (*release_region)(void *);
++	/*
++	 * function to be called upon pmem registration
++	 */
++	void *(*setup_region)(void);
++	/*
++	 * indicates that this region should be mapped/unmaped as needed
++	 */
++	int map_on_demand;
++	/*
++	 * indicates this pmem may be reused via fmem
++	 */
++	int reusable;
++};
++
++int pmem_setup(struct android_pmem_platform_data *pdata,
++	       long (*ioctl)(struct file *, unsigned int, unsigned long),
++	       int (*release)(struct inode *, struct file *));
++
++int pmem_remap(struct pmem_region *region, struct file *file,
++	       unsigned operation);
++#endif /* __KERNEL__ */
++
+ #endif //_ANDROID_PPP_H_
+ 
+diff --git a/include/linux/i2c-dev.h b/include/linux/i2c-dev.h
+index fd53bfd..8a7406b 100644
+--- a/include/linux/i2c-dev.h
++++ b/include/linux/i2c-dev.h
+@@ -16,7 +16,8 @@
+ 
+     You should have received a copy of the GNU General Public License
+     along with this program; if not, write to the Free Software
+-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
++    MA 02110-1301 USA.
+ */
+ 
+ #ifndef _LINUX_I2C_DEV_H
+diff --git a/include/linux/ion.h b/include/linux/ion.h
+index 41f99e4..2519270 100644
+--- a/include/linux/ion.h
++++ b/include/linux/ion.h
+@@ -21,7 +21,6 @@
+ #include <linux/ioctl.h>
+ #include <linux/types.h>
+ 
+-
+ struct ion_handle;
+ /**
+  * enum ion_heap_types - list of all possible types of heaps
+@@ -64,12 +63,12 @@ enum ion_heap_type {
+ 
+ enum ion_heap_ids {
+ 	INVALID_HEAP_ID = -1,
+-	ION_IOMMU_HEAP_ID = 4,
+ 	ION_CP_MM_HEAP_ID = 8,
+ 	ION_CP_MFC_HEAP_ID = 12,
+ 	ION_CP_WB_HEAP_ID = 16, /* 8660 only */
+ 	ION_CAMERA_HEAP_ID = 20, /* 8660 only */
+ 	ION_SF_HEAP_ID = 24,
++	ION_IOMMU_HEAP_ID = 25,
+ 	ION_QSECOM_HEAP_ID = 27,
+ 	ION_AUDIO_HEAP_ID = 28,
+ 
+@@ -79,6 +78,21 @@ enum ion_heap_ids {
+ 	ION_HEAP_ID_RESERVED = 31 /** Bit reserved for ION_SECURE flag */
+ };
+ 
++enum ion_fixed_position {
++	NOT_FIXED,
++	FIXED_LOW,
++	FIXED_MIDDLE,
++	FIXED_HIGH,
++};
++
++enum cp_mem_usage {
++	VIDEO_BITSTREAM = 0x1,
++	VIDEO_PIXEL = 0x2,
++	VIDEO_NONPIXEL = 0x3,
++	MAX_USAGE = 0x4,
++	UNKNOWN = 0x7FFFFFFF,
++};
++
+ /**
+  * Flag to use when allocating to indicate that a heap is secure.
+  */
+@@ -99,6 +113,7 @@ enum ion_heap_ids {
+ #define ION_WB_HEAP_NAME	"wb"
+ #define ION_MM_FIRMWARE_HEAP_NAME	"mm_fw"
+ #define ION_QSECOM_HEAP_NAME	"qsecom"
++#define ION_FMEM_HEAP_NAME	"fmem"
+ 
+ #define CACHED          1
+ #define UNCACHED        0
+@@ -109,6 +124,12 @@ enum ion_heap_ids {
+ 
+ #define ION_IS_CACHED(__flags)	((__flags) & (1 << ION_CACHE_SHIFT))
+ 
++/*
++ * This flag allows clients when mapping into the IOMMU to specify to
++ * defer un-mapping from the IOMMU until the buffer memory is freed.
++ */
++#define ION_IOMMU_UNMAP_DELAYED 1
++
+ #ifdef __KERNEL__
+ #include <linux/err.h>
+ #include <mach/ion.h>
+@@ -123,6 +144,7 @@ struct ion_buffer;
+    be converted to phys_addr_t.  For the time being many kernel interfaces
+    do not accept phys_addr_t's that would have to */
+ #define ion_phys_addr_t unsigned long
++#define ion_virt_addr_t unsigned long
+ 
+ /**
+  * struct ion_platform_heap - defines a heap in the given platform
+@@ -132,15 +154,9 @@ struct ion_buffer;
+  * @name:	used for debug purposes
+  * @base:	base address of heap in physical memory if applicable
+  * @size:	size of the heap in bytes if applicable
+- * @memory_type:	Memory type used for the heap
+- * @ion_memory_id:		Memory ID used to identify the memory to TZ
+- * @request_region: function to be called when the number of allocations goes
+- *						from 0 -> 1
+- * @release_region: function to be called when the number of allocations goes
+- *						from 1 -> 0
+- * @setup_region:   function to be called upon ion registration
+- *
+- * Provided by the board file.
++ * @memory_type:Memory type used for the heap
++ * @has_outer_cache:    set to 1 if outer cache is used, 0 otherwise.
++ * @extra_data:	Extra data specific to each heap type
+  */
+ struct ion_platform_heap {
+ 	enum ion_heap_type type;
+@@ -149,22 +165,71 @@ struct ion_platform_heap {
+ 	ion_phys_addr_t base;
+ 	size_t size;
+ 	enum ion_memory_types memory_type;
++	unsigned int has_outer_cache;
+ 	void *extra_data;
+ };
+ 
++/**
++ * struct ion_cp_heap_pdata - defines a content protection heap in the given
++ * platform
++ * @permission_type:	Memory ID used to identify the memory to TZ
++ * @align:		Alignment requirement for the memory
++ * @secure_base:	Base address for securing the heap.
++ *			Note: This might be different from actual base address
++ *			of this heap in the case of a shared heap.
++ * @secure_size:	Memory size for securing the heap.
++ *			Note: This might be different from actual size
++ *			of this heap in the case of a shared heap.
++ * @reusable		Flag indicating whether this heap is reusable of not.
++ *			(see FMEM)
++ * @mem_is_fmem		Flag indicating whether this memory is coming from fmem
++ *			or not.
++ * @fixed_position	If nonzero, position in the fixed area.
++ * @virt_addr:		Virtual address used when using fmem.
++ * @iommu_map_all:	Indicates whether we should map whole heap into IOMMU.
++ * @iommu_2x_map_domain: Indicates the domain to use for overmapping.
++ * @request_region:	function to be called when the number of allocations
++ *			goes from 0 -> 1
++ * @release_region:	function to be called when the number of allocations
++ *			goes from 1 -> 0
++ * @setup_region:	function to be called upon ion registration
++ *
++ */
+ struct ion_cp_heap_pdata {
+ 	enum ion_permission_type permission_type;
+ 	unsigned int align;
+ 	ion_phys_addr_t secure_base; /* Base addr used when heap is shared */
+ 	size_t secure_size; /* Size used for securing heap when heap is shared*/
++	int reusable;
++	int mem_is_fmem;
++	enum ion_fixed_position fixed_position;
++	int iommu_map_all;
++	int iommu_2x_map_domain;
++	ion_virt_addr_t *virt_addr;
+ 	int (*request_region)(void *);
+ 	int (*release_region)(void *);
+ 	void *(*setup_region)(void);
+ };
+ 
++/**
++ * struct ion_co_heap_pdata - defines a carveout heap in the given platform
++ * @adjacent_mem_id:	Id of heap that this heap must be adjacent to.
++ * @align:		Alignment requirement for the memory
++ * @mem_is_fmem		Flag indicating whether this memory is coming from fmem
++ *			or not.
++ * @fixed_position	If nonzero, position in the fixed area.
++ * @request_region:	function to be called when the number of allocations
++ *			goes from 0 -> 1
++ * @release_region:	function to be called when the number of allocations
++ *			goes from 1 -> 0
++ * @setup_region:	function to be called upon ion registration
++ *
++ */
+ struct ion_co_heap_pdata {
+ 	int adjacent_mem_id;
+ 	unsigned int align;
++	int mem_is_fmem;
++	enum ion_fixed_position fixed_position;
+ 	int (*request_region)(void *);
+ 	int (*release_region)(void *);
+ 	void *(*setup_region)(void);
+@@ -172,6 +237,7 @@ struct ion_co_heap_pdata {
+ 
+ /**
+  * struct ion_platform_data - array of platform heaps passed from board file
++ * @has_outer_cache:    set to 1 if outer cache is used, 0 otherwise.
+  * @nr:    number of structures in the array
+  * @request_region: function to be called when the number of allocations goes
+  *						from 0 -> 1
+@@ -183,6 +249,7 @@ struct ion_co_heap_pdata {
+  * Provided by the board file in the form of platform data to a platform device.
+  */
+ struct ion_platform_data {
++	unsigned int has_outer_cache;
+ 	int nr;
+ 	int (*request_region)(void *);
+ 	int (*release_region)(void *);
+@@ -193,6 +260,17 @@ struct ion_platform_data {
+ #ifdef CONFIG_ION
+ 
+ /**
++ * ion_reserve() - reserve memory for ion heaps if applicable
++ * @data:	platform data specifying starting physical address and
++ *		size
++ *
++ * Calls memblock reserve to set aside memory for heaps that are
++ * located at specific memory addresses or of specfic sizes not
++ * managed by the kernel
++ */
++void ion_reserve(struct ion_platform_data *data);
++
++/**
+  * ion_client_create() -  allocate a client and returns it
+  * @dev:	the global ion device
+  * @heap_mask:	mask of heaps this client can allocate from
+@@ -255,7 +333,7 @@ void ion_free(struct ion_client *client, struct ion_handle *handle);
+  * This function queries the heap for a particular handle to get the
+  * handle's physical address.  It't output is only correct if
+  * a heap returns physically contiguous memory -- in other cases
+- * this api should not be implemented -- ion_map_dma should be used
++ * this api should not be implemented -- ion_sg_table should be used
+  * instead.  Returns -EINVAL if the handle is invalid.  This has
+  * no implications on the reference counting of the handle --
+  * the returned value may not be valid if the caller is not
+@@ -265,6 +343,17 @@ int ion_phys(struct ion_client *client, struct ion_handle *handle,
+ 	     ion_phys_addr_t *addr, size_t *len);
+ 
+ /**
++ * ion_map_dma - return an sg_table describing a handle
++ * @client:	the client
++ * @handle:	the handle
++ *
++ * This function returns the sg_table describing
++ * a particular ion handle.
++ */
++struct sg_table *ion_sg_table(struct ion_client *client,
++			      struct ion_handle *handle);
++
++/**
+  * ion_map_kernel - create mapping for the given handle
+  * @client:	the client
+  * @handle:	handle to map
+@@ -285,64 +374,22 @@ void *ion_map_kernel(struct ion_client *client, struct ion_handle *handle,
+ void ion_unmap_kernel(struct ion_client *client, struct ion_handle *handle);
+ 
+ /**
+- * ion_map_dma - create a dma mapping for a given handle
++ * ion_share_dma_buf() - given an ion client, create a dma-buf fd
+  * @client:	the client
+- * @handle:	handle to map
+- *
+- * Return an sglist describing the given handle
+- */
+-struct scatterlist *ion_map_dma(struct ion_client *client,
+-				struct ion_handle *handle,
+-				unsigned long flags);
+-
+-/**
+- * ion_unmap_dma() - destroy a dma mapping for a handle
+- * @client:	the client
+- * @handle:	handle to unmap
++ * @handle:	the handle
+  */
+-void ion_unmap_dma(struct ion_client *client, struct ion_handle *handle);
++int ion_share_dma_buf(struct ion_client *client, struct ion_handle *handle);
+ 
+ /**
+- * ion_share() - given a handle, obtain a buffer to pass to other clients
++ * ion_import_dma_buf() - given an dma-buf fd from the ion exporter get handle
+  * @client:	the client
+- * @handle:	the handle to share
+- *
+- * Given a handle, return a buffer, which exists in a global name
+- * space, and can be passed to other clients.  Should be passed into ion_import
+- * to obtain a new handle for this buffer.
++ * @fd:		the dma-buf fd
+  *
+- * NOTE: This function does do not an extra reference.  The burden is on the
+- * caller to make sure the buffer doesn't go away while it's being passed to
+- * another client.  That is, ion_free should not be called on this handle until
+- * the buffer has been imported into the other client.
++ * Given an dma-buf fd that was allocated through ion via ion_share_dma_buf,
++ * import that fd and return a handle representing it.  If a dma-buf from
++ * another exporter is passed in this function will return ERR_PTR(-EINVAL)
+  */
+-struct ion_buffer *ion_share(struct ion_client *client,
+-			     struct ion_handle *handle);
+-
+-/**
+- * ion_import() - given an buffer in another client, import it
+- * @client:	this blocks client
+- * @buffer:	the buffer to import (as obtained from ion_share)
+- *
+- * Given a buffer, add it to the client and return the handle to use to refer
+- * to it further.  This is called to share a handle from one kernel client to
+- * another.
+- */
+-struct ion_handle *ion_import(struct ion_client *client,
+-			      struct ion_buffer *buffer);
+-
+-/**
+- * ion_import_fd() - given an fd obtained via ION_IOC_SHARE ioctl, import it
+- * @client:	this blocks client
+- * @fd:		the fd
+- *
+- * A helper function for drivers that will be recieving ion buffers shared
+- * with them from userspace.  These buffers are represented by a file
+- * descriptor obtained as the return from the ION_IOC_SHARE ioctl.
+- * This function coverts that fd into the underlying buffer, and returns
+- * the handle to use to refer to it further.
+- */
+-struct ion_handle *ion_import_fd(struct ion_client *client, int fd);
++struct ion_handle *ion_import_dma_buf(struct ion_client *client, int fd);
+ 
+ /**
+  * ion_handle_get_flags - get the flags for a given handle
+@@ -372,6 +419,7 @@ int ion_handle_get_flags(struct ion_client *client, struct ion_handle *handle,
+  * @iova - pointer to store the iova address
+  * @buffer_size - pointer to store the size of the buffer
+  * @flags - flags for options to map
++ * @iommu_flags - flags specific to the iommu.
+  *
+  * Maps the handle into the iova space specified via domain number. Iova
+  * will be allocated from the partition specified via partition_num.
+@@ -381,7 +429,7 @@ int ion_map_iommu(struct ion_client *client, struct ion_handle *handle,
+ 			int domain_num, int partition_num, unsigned long align,
+ 			unsigned long iova_length, unsigned long *iova,
+ 			unsigned long *buffer_size,
+-			unsigned long flags);
++			unsigned long flags, unsigned long iommu_flags);
+ 
+ 
+ /**
+@@ -421,22 +469,28 @@ void ion_unmap_iommu(struct ion_client *client, struct ion_handle *handle,
+  *
+  * @client - a client that has allocated from the heap heap_id
+  * @heap_id - heap id to secure.
++ * @version - version of content protection
++ * @data - extra data needed for protection
+  *
+  * Secure a heap
+  * Returns 0 on success
+  */
+-int ion_secure_heap(struct ion_device *dev, int heap_id);
++int ion_secure_heap(struct ion_device *dev, int heap_id, int version,
++			void *data);
+ 
+ /**
+  * ion_unsecure_heap - un-secure a heap
+  *
+  * @client - a client that has allocated from the heap heap_id
+  * @heap_id - heap id to un-secure.
++ * @version - version of content protection
++ * @data - extra data needed for protection
+  *
+  * Un-secure a heap
+  * Returns 0 on success
+  */
+-int ion_unsecure_heap(struct ion_device *dev, int heap_id);
++int ion_unsecure_heap(struct ion_device *dev, int heap_id, int version,
++			void *data);
+ 
+ /**
+  * msm_ion_secure_heap - secure a heap. Wrapper around ion_secure_heap.
+@@ -458,7 +512,53 @@ int msm_ion_secure_heap(int heap_id);
+  */
+ int msm_ion_unsecure_heap(int heap_id);
+ 
++/**
++ * msm_ion_secure_heap_2_0 - secure a heap using 2.0 APIs
++ *  Wrapper around ion_secure_heap.
++ *
++ * @heap_id - heap id to secure.
++ * @usage - usage hint to TZ
++ *
++ * Secure a heap
++ * Returns 0 on success
++ */
++int msm_ion_secure_heap_2_0(int heap_id, enum cp_mem_usage usage);
++
++/**
++ * msm_ion_unsecure_heap - unsecure a heap secured with 3.0 APIs.
++ * Wrapper around ion_unsecure_heap.
++ *
++ * @heap_id - heap id to secure.
++ * @usage - usage hint to TZ
++ *
++ * Un-secure a heap
++ * Returns 0 on success
++ */
++int msm_ion_unsecure_heap_2_0(int heap_id, enum cp_mem_usage usage);
++
++/**
++ * msm_ion_do_cache_op - do cache operations.
++ *
++ * @client - pointer to ION client.
++ * @handle - pointer to buffer handle.
++ * @vaddr -  virtual address to operate on.
++ * @len - Length of data to do cache operation on.
++ * @cmd - Cache operation to perform:
++ *		ION_IOC_CLEAN_CACHES
++ *		ION_IOC_INV_CACHES
++ *		ION_IOC_CLEAN_INV_CACHES
++ *
++ * Returns 0 on success
++ */
++int msm_ion_do_cache_op(struct ion_client *client, struct ion_handle *handle,
++			void *vaddr, unsigned long len, unsigned int cmd);
++
+ #else
++static inline void ion_reserve(struct ion_platform_data *data)
++{
++
++}
++
+ static inline struct ion_client *ion_client_create(struct ion_device *dev,
+ 				     unsigned int heap_mask, const char *name)
+ {
+@@ -489,38 +589,27 @@ static inline int ion_phys(struct ion_client *client,
+ 	return -ENODEV;
+ }
+ 
+-static inline void *ion_map_kernel(struct ion_client *client,
+-	struct ion_handle *handle, unsigned long flags)
++static inline struct sg_table *ion_sg_table(struct ion_client *client,
++			      struct ion_handle *handle)
+ {
+ 	return ERR_PTR(-ENODEV);
+ }
+ 
+-static inline void ion_unmap_kernel(struct ion_client *client,
+-	struct ion_handle *handle) { }
+-
+-static inline struct scatterlist *ion_map_dma(struct ion_client *client,
++static inline void *ion_map_kernel(struct ion_client *client,
+ 	struct ion_handle *handle, unsigned long flags)
+ {
+ 	return ERR_PTR(-ENODEV);
+ }
+ 
+-static inline void ion_unmap_dma(struct ion_client *client,
++static inline void ion_unmap_kernel(struct ion_client *client,
+ 	struct ion_handle *handle) { }
+ 
+-static inline struct ion_buffer *ion_share(struct ion_client *client,
+-	struct ion_handle *handle)
++static inline int ion_share_dma_buf(struct ion_client *client, struct ion_handle *handle)
+ {
+-	return ERR_PTR(-ENODEV);
+-}
+-
+-static inline struct ion_handle *ion_import(struct ion_client *client,
+-	struct ion_buffer *buffer)
+-{
+-	return ERR_PTR(-ENODEV);
++	return -ENODEV;
+ }
+ 
+-static inline struct ion_handle *ion_import_fd(struct ion_client *client,
+-	int fd)
++static inline struct ion_handle *ion_import_dma_buf(struct ion_client *client, int fd)
+ {
+ 	return ERR_PTR(-ENODEV);
+ }
+@@ -535,7 +624,9 @@ static inline int ion_map_iommu(struct ion_client *client,
+ 			struct ion_handle *handle, int domain_num,
+ 			int partition_num, unsigned long align,
+ 			unsigned long iova_length, unsigned long *iova,
+-			unsigned long flags)
++			unsigned long *buffer_size,
++			unsigned long flags,
++			unsigned long iommu_flags)
+ {
+ 	return -ENODEV;
+ }
+@@ -547,13 +638,15 @@ static inline void ion_unmap_iommu(struct ion_client *client,
+ 	return;
+ }
+ 
+-static inline int ion_secure_heap(struct ion_device *dev, int heap_id)
++static inline int ion_secure_heap(struct ion_device *dev, int heap_id,
++					int version, void *data)
+ {
+ 	return -ENODEV;
+ 
+ }
+ 
+-static inline int ion_unsecure_heap(struct ion_device *dev, int heap_id)
++static inline int ion_unsecure_heap(struct ion_device *dev, int heap_id,
++					int version, void *data)
+ {
+ 	return -ENODEV;
+ }
+@@ -568,6 +661,25 @@ static inline int msm_ion_unsecure_heap(int heap_id)
+ {
+ 	return -ENODEV;
+ }
++
++static inline int msm_ion_secure_heap_2_0(int heap_id, enum cp_mem_usage usage)
++{
++	return -ENODEV;
++}
++
++static inline int msm_ion_unsecure_heap_2_0(int heap_id,
++					enum cp_mem_usage usage)
++{
++	return -ENODEV;
++}
++
++static inline int msm_ion_do_cache_op(struct ion_client *client,
++			struct ion_handle *handle, void *vaddr,
++			unsigned long len, unsigned int cmd)
++{
++	return -ENODEV;
++}
++
+ #endif /* CONFIG_ION */
+ #endif /* __KERNEL__ */
+ 
+diff --git a/include/linux/msm_audio.h b/include/linux/msm_audio.h
+index e995c3e..27285a8 100644
+--- a/include/linux/msm_audio.h
++++ b/include/linux/msm_audio.h
+@@ -1,6 +1,7 @@
+ /* include/linux/msm_audio.h
+  *
+  * Copyright (C) 2008 Google, Inc.
++ * Copyright (c) 2012 Code Aurora Forum. All rights reserved.
+  *
+  * This software is licensed under the terms of the GNU General Public
+  * License version 2, as published by the Free Software Foundation, and
+@@ -63,6 +64,9 @@
+ 					unsigned short)
+ #define AUDIO_GET_BITSTREAM_ERROR_INFO _IOR(AUDIO_IOCTL_MAGIC, 42, \
+ 			       struct msm_audio_bitstream_error_info)
++
++#define AUDIO_SET_SRS_TRUMEDIA_PARAM _IOW(AUDIO_IOCTL_MAGIC, 43, unsigned)
++
+ /* Qualcomm extensions */
+ #define AUDIO_SET_STREAM_CONFIG   _IOW(AUDIO_IOCTL_MAGIC, 80, \
+ 				struct msm_audio_stream_config)
+@@ -90,6 +94,9 @@
+ #define AUDIO_GET_ACDB_BLK _IOW(AUDIO_IOCTL_MAGIC, 96,  \
+ 					struct msm_acdb_cmd_device)
+ 
++#define AUDIO_REGISTER_ION _IOW(AUDIO_IOCTL_MAGIC, 97, unsigned)
++#define AUDIO_DEREGISTER_ION _IOW(AUDIO_IOCTL_MAGIC, 98, unsigned)
++
+ #define	AUDIO_MAX_COMMON_IOCTL_NUM	100
+ 
+ 
+@@ -129,6 +136,8 @@
+ #define IIR_ENABLE		0x0004
+ #define QCONCERT_PLUS_ENABLE	0x0008
+ #define MBADRC_ENABLE		0x0010
++#define SRS_ENABLE		0x0020
++#define SRS_DISABLE	0x0040
+ 
+ #define AGC_ENABLE		0x0001
+ #define NS_ENABLE		0x0002
+@@ -166,6 +175,11 @@ struct msm_audio_stats {
+ 	uint32_t unused[2];
+ };
+ 
++struct msm_audio_ion_info {
++	int fd;
++	void *vaddr;
++};
++
+ struct msm_audio_pmem_info {
+ 	int fd;
+ 	void *vaddr;
+@@ -208,6 +222,28 @@ struct msm_snd_device_config {
+ 
+ #define SND_SET_DEVICE _IOW(SND_IOCTL_MAGIC, 2, struct msm_device_config *)
+ 
++enum cad_device_path_type {
++	CAD_DEVICE_PATH_RX,	/*For Decoding session*/
++	CAD_DEVICE_PATH_TX,	/* For Encoding session*/
++	CAD_DEVICE_PATH_RX_TX, /* For Voice call */
++	CAD_DEVICE_PATH_LB,	/* For loopback (FM Analog)*/
++	CAD_DEVICE_PATH_MAX
++};
++
++struct cad_devices_type {
++	uint32_t rx_device;
++	uint32_t tx_device;
++	enum cad_device_path_type pathtype;
++};
++
++struct msm_cad_device_config {
++	struct cad_devices_type device;
++	uint32_t ear_mute;
++	uint32_t mic_mute;
++};
++
++#define CAD_SET_DEVICE _IOW(SND_IOCTL_MAGIC, 2, struct msm_cad_device_config *)
++
+ #define SND_METHOD_VOICE 0
+ 
+ struct msm_snd_volume_config {
+@@ -218,6 +254,14 @@ struct msm_snd_volume_config {
+ 
+ #define SND_SET_VOLUME _IOW(SND_IOCTL_MAGIC, 3, struct msm_snd_volume_config *)
+ 
++struct msm_cad_volume_config {
++	struct cad_devices_type device;
++	uint32_t method;
++	uint32_t volume;
++};
++
++#define CAD_SET_VOLUME _IOW(SND_IOCTL_MAGIC, 3, struct msm_cad_volume_config *)
++
+ /* Returns the number of SND endpoints supported. */
+ 
+ #define SND_GET_NUM_ENDPOINTS _IOR(SND_IOCTL_MAGIC, 4, unsigned *)
+@@ -240,6 +284,24 @@ struct msm_snd_endpoint {
+ #define SND_AVC_CTL _IOW(SND_IOCTL_MAGIC, 6, unsigned *)
+ #define SND_AGC_CTL _IOW(SND_IOCTL_MAGIC, 7, unsigned *)
+ 
++/*return the number of CAD endpoints supported. */
++
++#define CAD_GET_NUM_ENDPOINTS _IOR(SND_IOCTL_MAGIC, 4, unsigned *)
++
++struct msm_cad_endpoint {
++	int id; /* input and output */
++	char name[64]; /* output only */
++};
++
++/* Takes an index between 0 and one less than the number returned by
++ * SND_GET_NUM_ENDPOINTS, and returns the CAD index and name of a
++ * CAD endpoint.  On input, the .id field contains the number of the
++ * endpoint, and on exit it contains the SND index, while .name contains
++ * the description of the endpoint.
++ */
++
++#define CAD_GET_ENDPOINT _IOWR(SND_IOCTL_MAGIC, 5, struct msm_cad_endpoint *)
++
+ struct msm_audio_pcm_config {
+ 	uint32_t pcm_feedback;	/* 0 - disable > 0 - enable */
+ 	uint32_t buffer_count;	/* Number of buffers to allocate */
+@@ -349,8 +411,8 @@ struct msm_acdb_cmd_device {
+ 	uint32_t     *phys_buf;           /* Physical Address of data */
+ };
+ 
+-/*LGE_CHANGE_S : seven.kim@lge.com kernel3.0 porting based on kernel2.6.38*/
+-/* LGE_CHANGE_S :  2011-12-14, gt.kim@lge.com, Desc: Audio Part Merge From GB   */
++/*LGE_CHANGE_S : jaz.john@lge.com kernel3.0 porting based on kernel2.6.38*/
++/* LGE_CHANGE_S :  2012-04-21, jaz.john@lge.com, Desc: Audio Part Merge From GB   */
+ //#if defined (CONFIG_MACH_LGE)
+ #if 1
+ /* Inherit LGE Android Definition from [junyoub.an@lge.com] */
+@@ -626,7 +688,7 @@ struct msm_snd_set_bt_nerc_param {
+ #define SND_SET_HOOK_MODE			_IOWR(SND_IOCTL_MAGIC, 20, struct msm_snd_set_hook_mode_param *)
+ #define SND_SET_AMP_MODE			_IOWR(SND_IOCTL_MAGIC, 21, struct msm_snd_set_hook_mode_param *)
+ #endif
+-/*LGE_CHANGE_E : seven.kim@lge.com kernel3.0 porting based on kernel2.6.38*/
++/*LGE_CHANGE_E : jaz.john@lge.com kernel3.0 porting based on kernel2.6.38*/
+ 
+ /* LGE_CHANGE_S :  2011-12-30, gt.kim@lge.com, Description: function of BT NREC */
+ #define SND_SET_NREC                _IOWR(SND_IOCTL_MAGIC, 22, struct msm_snd_set_hook_mode_param *)
+diff --git a/include/linux/msm_kgsl.h b/include/linux/msm_kgsl.h
+index 5e37c02..e67190f 100644
+--- a/include/linux/msm_kgsl.h
++++ b/include/linux/msm_kgsl.h
+@@ -2,13 +2,18 @@
+ #define _MSM_KGSL_H
+ 
+ #define KGSL_VERSION_MAJOR        3
+-#define KGSL_VERSION_MINOR        8
++#define KGSL_VERSION_MINOR        11
+ 
+ /*context flags */
+-#define KGSL_CONTEXT_SAVE_GMEM	1
+-#define KGSL_CONTEXT_NO_GMEM_ALLOC	2
+-#define KGSL_CONTEXT_SUBMIT_IB_LIST	4
+-#define KGSL_CONTEXT_CTX_SWITCH	8
++#define KGSL_CONTEXT_SAVE_GMEM		0x00000001
++#define KGSL_CONTEXT_NO_GMEM_ALLOC	0x00000002
++#define KGSL_CONTEXT_SUBMIT_IB_LIST	0x00000004
++#define KGSL_CONTEXT_CTX_SWITCH		0x00000008
++#define KGSL_CONTEXT_PREAMBLE		0x00000010
++#define KGSL_CONTEXT_TRASH_STATE	0x00000020
++#define KGSL_CONTEXT_PER_CONTEXT_TS	0x00000040
++
++#define KGSL_CONTEXT_INVALID 0xffffffff
+ 
+ /* Memory allocayion flags */
+ #define KGSL_MEMFLAGS_GPUREADONLY	0x01000000
+@@ -24,6 +29,7 @@
+ #define KGSL_FLAGS_RESERVED1   0x00000040
+ #define KGSL_FLAGS_RESERVED2   0x00000080
+ #define KGSL_FLAGS_SOFT_RESET  0x00000100
++#define KGSL_FLAGS_PER_CONTEXT_TIMESTAMPS 0x00000200
+ 
+ /* Clock flags to show which clocks should be controled by a given platform */
+ #define KGSL_CLK_SRC	0x00000001
+@@ -33,6 +39,16 @@
+ #define KGSL_CLK_MEM_IFACE 0x00000010
+ #define KGSL_CLK_AXI	0x00000020
+ 
++/*
++ * Reset status values for context
++ */
++enum kgsl_ctx_reset_stat {
++	KGSL_CTX_STAT_NO_ERROR				= 0x00000000,
++	KGSL_CTX_STAT_GUILTY_CONTEXT_RESET_EXT		= 0x00000001,
++	KGSL_CTX_STAT_INNOCENT_CONTEXT_RESET_EXT	= 0x00000002,
++	KGSL_CTX_STAT_UNKNOWN_CONTEXT_RESET_EXT		= 0x00000003
++};
++
+ #define KGSL_MAX_PWRLEVELS 5
+ 
+ #define KGSL_CONVERT_TO_MBPS(val) \
+@@ -88,15 +104,15 @@ struct kgsl_devmemstore {
+ 	unsigned int sbz5;
+ };
+ 
+-#define KGSL_DEVICE_MEMSTORE_OFFSET(field) \
+-	offsetof(struct kgsl_devmemstore, field)
+-
++#define KGSL_MEMSTORE_OFFSET(ctxt_id, field) \
++	((ctxt_id)*sizeof(struct kgsl_devmemstore) + \
++	 offsetof(struct kgsl_devmemstore, field))
+ 
+ /* timestamp id*/
+ enum kgsl_timestamp_type {
+ 	KGSL_TIMESTAMP_CONSUMED = 0x00000001, /* start-of-pipeline timestamp */
+ 	KGSL_TIMESTAMP_RETIRED  = 0x00000002, /* end-of-pipeline timestamp*/
+-	KGSL_TIMESTAMP_MAX      = 0x00000002,
++	KGSL_TIMESTAMP_QUEUED   = 0x00000003,
+ };
+ 
+ /* property types - used with kgsl_device_getproperty */
+@@ -109,6 +125,8 @@ enum kgsl_property_type {
+ 	KGSL_PROP_MMU_ENABLE 	  = 0x00000006,
+ 	KGSL_PROP_INTERRUPT_WAITS = 0x00000007,
+ 	KGSL_PROP_VERSION         = 0x00000008,
++	KGSL_PROP_GPU_RESET_STAT  = 0x00000009,
++	KGSL_PROP_PWRCTRL         = 0x0000000E,
+ };
+ 
+ struct kgsl_shadowprop {
+@@ -139,17 +157,37 @@ struct kgsl_version {
+ #define KGSL_2D1_REG_MEMORY	"kgsl_2d1_reg_memory"
+ #define KGSL_2D1_IRQ		"kgsl_2d1_irq"
+ 
++enum kgsl_iommu_context_id {
++	KGSL_IOMMU_CONTEXT_USER = 0,
++	KGSL_IOMMU_CONTEXT_PRIV = 1,
++};
++
++struct kgsl_iommu_ctx {
++	const char *iommu_ctx_name;
++	enum kgsl_iommu_context_id ctx_id;
++};
++
++struct kgsl_device_iommu_data {
++	const struct kgsl_iommu_ctx *iommu_ctxs;
++	int iommu_ctx_count;
++	unsigned int physstart;
++	unsigned int physend;
++};
++
+ struct kgsl_device_platform_data {
+ 	struct kgsl_pwrlevel pwrlevel[KGSL_MAX_PWRLEVELS];
+ 	int init_level;
+ 	int num_levels;
+ 	int (*set_grp_async)(void);
+ 	unsigned int idle_timeout;
++	bool strtstp_sleepwake;
+ 	unsigned int nap_allowed;
+ 	unsigned int clk_map;
++	unsigned int idle_needed;
+ 	struct msm_bus_scale_pdata *bus_scale_table;
+-	const char *iommu_user_ctx_name;
+-	const char *iommu_priv_ctx_name;
++	struct kgsl_device_iommu_data *iommu_data;
++	int iommu_count;
++	struct msm_dcvs_core_info *core_info;
+ };
+ 
+ #endif
+@@ -184,19 +222,8 @@ struct kgsl_device_getproperty {
+ #define IOCTL_KGSL_DEVICE_GETPROPERTY \
+ 	_IOWR(KGSL_IOC_TYPE, 0x2, struct kgsl_device_getproperty)
+ 
+-
+-/* read a GPU register.
+-   offsetwords it the 32 bit word offset from the beginning of the
+-   GPU register space.
++/* IOCTL_KGSL_DEVICE_READ (0x3) - removed 03/2012
+  */
+-struct kgsl_device_regread {
+-	unsigned int offsetwords;
+-	unsigned int value; /* output param */
+-};
+-
+-#define IOCTL_KGSL_DEVICE_REGREAD \
+-	_IOWR(KGSL_IOC_TYPE, 0x3, struct kgsl_device_regread)
+-
+ 
+ /* block until the GPU has executed past a given timestamp
+  * timeout is in milliseconds.
+@@ -209,6 +236,14 @@ struct kgsl_device_waittimestamp {
+ #define IOCTL_KGSL_DEVICE_WAITTIMESTAMP \
+ 	_IOW(KGSL_IOC_TYPE, 0x6, struct kgsl_device_waittimestamp)
+ 
++struct kgsl_device_waittimestamp_ctxtid {
++	unsigned int context_id;
++	unsigned int timestamp;
++	unsigned int timeout;
++};
++
++#define IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID \
++	_IOW(KGSL_IOC_TYPE, 0x7, struct kgsl_device_waittimestamp_ctxtid)
+ 
+ /* issue indirect commands to the GPU.
+  * drawctxt_id must have been created with IOCTL_KGSL_DRAWCTXT_CREATE
+@@ -302,6 +337,26 @@ struct kgsl_map_user_mem {
+ #define IOCTL_KGSL_MAP_USER_MEM \
+ 	_IOWR(KGSL_IOC_TYPE, 0x15, struct kgsl_map_user_mem)
+ 
++struct kgsl_cmdstream_readtimestamp_ctxtid {
++	unsigned int context_id;
++	unsigned int type;
++	unsigned int timestamp; /*output param */
++};
++
++#define IOCTL_KGSL_CMDSTREAM_READTIMESTAMP_CTXTID \
++	_IOWR(KGSL_IOC_TYPE, 0x16, struct kgsl_cmdstream_readtimestamp_ctxtid)
++
++struct kgsl_cmdstream_freememontimestamp_ctxtid {
++	unsigned int context_id;
++	unsigned int gpuaddr;
++	unsigned int type;
++	unsigned int timestamp;
++};
++
++#define IOCTL_KGSL_CMDSTREAM_FREEMEMONTIMESTAMP_CTXTID \
++	_IOW(KGSL_IOC_TYPE, 0x17, \
++	struct kgsl_cmdstream_freememontimestamp_ctxtid)
++
+ /* add a block of pmem or fb into the GPU address space */
+ struct kgsl_sharedmem_from_pmem {
+ 	int pmem_fd;
+@@ -445,6 +500,14 @@ struct kgsl_timestamp_event_genlock {
+ 	int handle; /* Handle of the genlock lock to release */
+ };
+ 
++/*
++ * Set a property within the kernel.  Uses the same structure as
++ * IOCTL_KGSL_GETPROPERTY
++ */
++
++#define IOCTL_KGSL_SETPROPERTY \
++	_IOW(KGSL_IOC_TYPE, 0x32, struct kgsl_device_getproperty)
++
+ #ifdef __KERNEL__
+ #ifdef CONFIG_MSM_KGSL_DRM
+ int kgsl_gem_obj_addr(int drm_fd, int handle, unsigned long *start,
+diff --git a/include/linux/msm_mdp.h b/include/linux/msm_mdp.h
+index ecb2b98..121839c 100644
+--- a/include/linux/msm_mdp.h
++++ b/include/linux/msm_mdp.h
+@@ -25,7 +25,7 @@
+ #define MSMFB_RESUME_SW_REFRESHER _IOW(MSMFB_IOCTL_MAGIC, 129, unsigned int)
+ #define MSMFB_CURSOR _IOW(MSMFB_IOCTL_MAGIC, 130, struct fb_cursor)
+ #define MSMFB_SET_LUT _IOW(MSMFB_IOCTL_MAGIC, 131, struct fb_cmap)
+-#define MSMFB_HISTOGRAM _IOWR(MSMFB_IOCTL_MAGIC, 132, struct mdp_histogram)
++#define MSMFB_HISTOGRAM _IOWR(MSMFB_IOCTL_MAGIC, 132, struct mdp_histogram_data)
+ /* new ioctls's for set/get ccs matrix */
+ #define MSMFB_GET_CCS_MATRIX  _IOWR(MSMFB_IOCTL_MAGIC, 133, struct mdp_ccs)
+ #define MSMFB_SET_CCS_MATRIX  _IOW(MSMFB_IOCTL_MAGIC, 134, struct mdp_ccs)
+@@ -47,8 +47,9 @@
+ #define MSMFB_OVERLAY_BLT       _IOWR(MSMFB_IOCTL_MAGIC, 142, \
+ 						struct msmfb_overlay_blt)
+ #define MSMFB_OVERLAY_BLT_OFFSET     _IOW(MSMFB_IOCTL_MAGIC, 143, unsigned int)
+-#define MSMFB_HISTOGRAM_START	_IO(MSMFB_IOCTL_MAGIC, 144)
+-#define MSMFB_HISTOGRAM_STOP	_IO(MSMFB_IOCTL_MAGIC, 145)
++#define MSMFB_HISTOGRAM_START	_IOR(MSMFB_IOCTL_MAGIC, 144, \
++						struct mdp_histogram_start_req)
++#define MSMFB_HISTOGRAM_STOP	_IOR(MSMFB_IOCTL_MAGIC, 145, unsigned int)
+ #define MSMFB_NOTIFY_UPDATE	_IOW(MSMFB_IOCTL_MAGIC, 146, unsigned int)
+ 
+ #define MSMFB_OVERLAY_3D       _IOWR(MSMFB_IOCTL_MAGIC, 147, \
+@@ -67,12 +68,8 @@
+ 						struct msmfb_data)
+ #define MSMFB_WRITEBACK_TERMINATE _IO(MSMFB_IOCTL_MAGIC, 155)
+ #define MSMFB_MDP_PP _IOWR(MSMFB_IOCTL_MAGIC, 156, struct msmfb_mdp_pp)
+-
+-#define MSMFB_OVERLAY_VSYNC_CTRL  _IOW(MSMFB_IOCTL_MAGIC, 160, unsigned int)
++#define MSMFB_OVERLAY_VSYNC_CTRL _IOW(MSMFB_IOCTL_MAGIC, 160, unsigned int)
+ #define MSMFB_VSYNC_CTRL  _IOW(MSMFB_IOCTL_MAGIC, 161, unsigned int)
+-#define MSMFB_METADATA_SET  _IOW(MSMFB_IOCTL_MAGIC, 162, struct msmfb_metadata)
+-#define MSMFB_OVERLAY_COMMIT      _IOW(MSMFB_IOCTL_MAGIC, 163, unsigned int)
+-
+ #define FB_TYPE_3D_PANEL 0x10101010
+ #define MDP_IMGTYPE2_START 0x10000
+ #define MSMFB_DRIVER_VERSION	0xF9E8D701
+@@ -93,6 +90,8 @@ enum {
+ 	MDP_YCRYCB_H2V1,  /* YCrYCb interleave */
+ 	MDP_Y_CRCB_H2V1,  /* Y and CrCb, pseduo planer w/ Cr is in MSB */
+ 	MDP_Y_CBCR_H2V1,   /* Y and CrCb, pseduo planer w/ Cr is in MSB */
++	MDP_Y_CRCB_H1V2,
++	MDP_Y_CBCR_H1V2,
+ 	MDP_RGBA_8888,    /* ARGB 888 */
+ 	MDP_BGRA_8888,	  /* ABGR 888 */
+ 	MDP_RGBX_8888,	  /* RGBX 888 */
+@@ -105,10 +104,10 @@ enum {
+ 	MDP_Y_CBCR_H1V1,  /* Y and CbCr, pseduo planer w/ Cb is in MSB */
+ 	MDP_YCRCB_H1V1,   /* YCrCb interleave */
+ 	MDP_YCBCR_H1V1,   /* YCbCr interleave */
++	MDP_BGR_565,      /* BGR 565 planer */
+ 	MDP_IMGTYPE_LIMIT,
+ 	MDP_RGB_BORDERFILL,	/* border fill pipe */
+-	MDP_BGR_565 = MDP_IMGTYPE2_START,      /* BGR 565 planer */
+-	MDP_FB_FORMAT,    /* framebuffer format */
++	MDP_FB_FORMAT = MDP_IMGTYPE2_START,    /* framebuffer format */
+ 	MDP_IMGTYPE_LIMIT2 /* Non valid image type after this enum */
+ };
+ 
+@@ -125,6 +124,9 @@ enum {
+ 	NUM_HSIC_PARAM,
+ };
+ 
++#define MDSS_MDP_ROT_ONLY		0x80
++#define MDSS_MDP_RIGHT_MIXER		0x100
++
+ /* mdp_blit_req flag values */
+ #define MDP_ROT_NOP 0
+ #define MDP_FLIP_LR 0x1
+@@ -135,6 +137,14 @@ enum {
+ #define MDP_DITHER 0x8
+ #define MDP_BLUR 0x10
+ #define MDP_BLEND_FG_PREMULT 0x20000
++/* vinay.bhooma@lge.com TD Fix issue 261189
++ * QUALCOMM Patch for SR#01078394 - Screen flickers on launching opera for 1st time.
++ * Target : UO/P700 
++ * Screen flickers for target which support MDP Composition.
++ * With GPU Composition model e.g. V3 screen flickering issue is not observed.
++*/ 
++#define MDP_IS_FG 0x40000
++/**End of QUALCOMM Patch for SR#01078394 - Screen flickers on launching opera for 1st time */
+ #define MDP_DEINTERLACE 0x80000000
+ #define MDP_SHARPENING  0x40000000
+ #define MDP_NO_DMA_BARRIER_START	0x20000000
+@@ -252,6 +262,7 @@ struct msmfb_overlay_data {
+ 	uint32_t version_key;
+ 	struct msmfb_data plane1_data;
+ 	struct msmfb_data plane2_data;
++	struct msmfb_data dst_data;
+ };
+ 
+ struct msmfb_img {
+@@ -341,9 +352,9 @@ enum {
+ };
+ 
+ /*
+-mdp_histogram_start_req is used to provide the parameters for
+-histogram start request
+-*/
++ * mdp_histogram_start_req is used to provide the parameters for
++ * histogram start request
++ */
+ 
+ struct mdp_histogram_start_req {
+ 	uint32_t block;
+@@ -352,15 +363,11 @@ struct mdp_histogram_start_req {
+ 	uint8_t num_bins;
+ };
+ 
+-
+ /*
+-
+-   mdp_histogram_data is used to return the histogram data, once
+-   the histogram is done/stopped/cance
+-
++ * mdp_histogram_data is used to return the histogram data, once
++ * the histogram is done/stopped/cance
+  */
+ 
+-
+ struct mdp_histogram_data {
+ 	uint32_t block;
+ 	uint8_t bin_cnt;
+@@ -448,6 +455,14 @@ struct mdp_lut_cfg_data {
+ 	} data;
+ };
+ 
++struct mdp_qseed_cfg_data {
++	uint32_t block;
++	uint32_t table_num;
++	uint32_t ops;
++	uint32_t len;
++	uint32_t *data;
++};
++
+ struct mdp_bl_scale_data {
+ 	uint32_t min_lvl;
+ 	uint32_t scale;
+@@ -457,6 +472,7 @@ enum {
+ 	mdp_op_pcc_cfg,
+ 	mdp_op_csc_cfg,
+ 	mdp_op_lut_cfg,
++	mdp_op_qseed_cfg,
+ 	mdp_bl_scale_cfg,
+ 	mdp_op_max,
+ };
+@@ -467,27 +483,12 @@ struct msmfb_mdp_pp {
+ 		struct mdp_pcc_cfg_data pcc_cfg_data;
+ 		struct mdp_csc_cfg_data csc_cfg_data;
+ 		struct mdp_lut_cfg_data lut_cfg_data;
++		struct mdp_qseed_cfg_data qseed_cfg_data;
+ 		struct mdp_bl_scale_data bl_scale_data;
+ 	} data;
+ };
+ 
+-enum {
+-	metadata_op_none,
+-	metadata_op_base_blend,
+-	metadata_op_max
+-};
+-
+-struct mdp_blend_cfg {
+-	uint32_t is_premultiplied;
+-};
+ 
+-struct msmfb_metadata {
+-	uint32_t op;
+-	uint32_t flags;
+-	union {
+-		struct mdp_blend_cfg blend_cfg;
+-	} data;
+-};
+ struct mdp_page_protection {
+ 	uint32_t page_protection;
+ };
+diff --git a/include/linux/msm_rotator.h b/include/linux/msm_rotator.h
+index 02ffd59..17ae867 100644
+--- a/include/linux/msm_rotator.h
++++ b/include/linux/msm_rotator.h
+@@ -31,6 +31,7 @@ struct msm_rotator_img_info {
+ 	unsigned char   rotations;
+ 	int enable;
+ 	unsigned int	downscale_ratio;
++	unsigned int secure;
+ };
+ 
+ struct msm_rotator_data_info {
+@@ -52,10 +53,10 @@ struct msm_rotator_platform_data {
+ 	unsigned int number_of_clocks;
+ 	unsigned int hardware_version_number;
+ 	struct msm_rot_clocks *rotator_clks;
+-	const char *regulator_name;
+ #ifdef CONFIG_MSM_BUS_SCALING
+ 	struct msm_bus_scale_pdata *bus_scale_table;
+ #endif
++	char rot_iommu_split_domain;
+ };
+ #endif
+ 
+diff --git a/include/linux/msm_vidc_dec.h b/include/linux/msm_vidc_dec.h
+index 9c742b5..3d8907a 100644
+--- a/include/linux/msm_vidc_dec.h
++++ b/include/linux/msm_vidc_dec.h
+@@ -207,6 +207,9 @@ struct vdec_ioctl_msg {
+ #define VDEC_IOCTL_GET_DISABLE_DMX_SUPPORT \
+ 	_IOR(VDEC_IOCTL_MAGIC, 37, struct vdec_ioctl_msg)
+ 
++#define VDEC_IOCTL_SET_PERF_CLK \
++	_IOR(VDEC_IOCTL_MAGIC, 38, struct vdec_ioctl_msg)
++
+ enum vdec_picture {
+ 	PICTURE_TYPE_I,
+ 	PICTURE_TYPE_P,
+@@ -514,6 +517,12 @@ struct vdec_framesize {
+ 	uint32_t   bottom;
+ };
+ 
++struct vdec_aspectratioinfo {
++	uint32_t aspect_ratio;
++	uint32_t par_width;
++	uint32_t par_height;
++};
++
+ struct vdec_output_frameinfo {
+ 	void __user *bufferaddr;
+ 	size_t offset;
+@@ -525,6 +534,7 @@ struct vdec_output_frameinfo {
+ 	void *input_frame_clientdata;
+ 	struct vdec_framesize framesize;
+ 	enum vdec_interlaced_format interlaced_format;
++	struct vdec_aspectratioinfo aspect_ratio_info;
+ };
+ 
+ union vdec_msgdata {
+diff --git a/include/linux/msm_vidc_enc.h b/include/linux/msm_vidc_enc.h
+index bf149eb..519c537 100644
+--- a/include/linux/msm_vidc_enc.h
++++ b/include/linux/msm_vidc_enc.h
+@@ -454,6 +454,10 @@ struct venc_ioctl_msg{
+ #define VEN_IOCTL_GET_EXTRADATA \
+ 	_IOR(VEN_IOCTLBASE_ENC, 49, struct venc_ioctl_msg)
+ 
++/*IOCTL params:SET: InputData - NULL, OutputData - NULL.*/
++#define VEN_IOCTL_SET_SLICE_DELIVERY_MODE \
++	_IO(VEN_IOCTLBASE_ENC, 50)
++
+ struct venc_switch{
+ 	unsigned char	status;
+ };
